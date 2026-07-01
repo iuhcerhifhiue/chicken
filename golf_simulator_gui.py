@@ -1,15 +1,11 @@
 import pygame
-import sys
 import math
+import numpy as np # physics module uses numpy, so GUI might need it for coordinate conversion
 
-# Initialize Pygame
-pygame.init()
-
-# Screen dimensions
+# --- Constants for GUI ---
 SCREEN_WIDTH = 800
 SCREEN_HEIGHT = 600
-SCREEN = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
-pygame.display.set_caption("Golf Putting Simulator")
+FPS = 60
 
 # Colors
 WHITE = (255, 255, 255)
@@ -19,155 +15,230 @@ BALL_COLOR = (200, 200, 200) # Light grey for the ball
 HOLE_COLOR = (0, 0, 0) # Black for the hole
 RED = (255, 0, 0) # For velocity vector
 
-# GolfBall class
-class GolfBall:
-    def __init__(self, x, y, radius=10):
-        self.x = x
-        self.y = y
-        self.radius = radius
-        self.velocity_x = 0
-        self.velocity_y = 0
-        self.friction = 0.98 # Simple friction model
-        self.stopped_threshold = 0.1
+# Scale factor from physics coordinates (meters) to screen coordinates (pixels)
+# Assuming 1 meter = 100 pixels, adjust as necessary
+METERS_TO_PIXELS = 100
 
-    def move(self):
-        # Apply friction
-        self.velocity_x *= self.friction
-        self.velocity_y *= self.friction
+class GUIManager:
+    def __init__(self, screen_width, screen_height):
+        pygame.init()
+        self.screen_width = screen_width
+        self.screen_height = screen_height
+        self.screen = pygame.display.set_mode((self.screen_width, self.screen_height))
+        pygame.display.set_caption("Golf Putting Simulator")
+        self.clock = pygame.time.Clock()
+        self.font = pygame.font.Font(None, 36) # For displaying text
 
-        # Update position
-        self.x += self.velocity_x
-        self.y += self.velocity_y
+        # State for dragging input
+        self.dragging = False
+        self.drag_start_pos = (0, 0) # Screen coordinates
+        self.current_mouse_pos = (0, 0) # Screen coordinates
 
-        # Stop if velocity is very low
-        if abs(self.velocity_x) < self.stopped_threshold and abs(self.velocity_y) < self.stopped_threshold:
-            self.velocity_x = 0
-            self.velocity_y = 0
+    def _meters_to_pixels(self, position_meters):
+        """Converts physics coordinates (meters) to screen coordinates (pixels)."""
+        # Assuming origin (0,0) for physics is bottom-left and screen origin (0,0) is top-left
+        # and also scaling for the screen size.
+        # This conversion might need careful adjustment based on the physics module's coordinate system.
+        # For simplicity, let's assume physics (0,0) maps to screen (0, SCREEN_HEIGHT) or similar,
+        # and scale appropriately.
+        # Let's map physics (0,0) to screen (50, SCREEN_HEIGHT - 50) for a border,
+        # and scale such that 1m = METERS_TO_PIXELS pixels.
+        # This is a placeholder and will likely need tuning.
+        
+        # Simple direct mapping for now, assuming physics coordinates are somewhat aligned with screen.
+        # If physics coordinates are small (e.g., 0-10m) and screen is 0-800 pixels:
+        return (int(position_meters[0] * METERS_TO_PIXELS), 
+                int(self.screen_height - (position_meters[1] * METERS_TO_PIXELS)))
 
-        # Keep ball within screen bounds (simple collision)
-        if self.x - self.radius < 0:
-            self.x = self.radius
-            self.velocity_x *= -0.5 # Bounce with some energy loss
-        if self.x + self.radius > SCREEN_WIDTH:
-            self.x = SCREEN_WIDTH - self.radius
-            self.velocity_x *= -0.5
-        if self.y - self.radius < 0:
-            self.y = self.radius
-            self.velocity_y *= -0.5
-        if self.y + self.radius > SCREEN_HEIGHT:
-            self.y = SCREEN_HEIGHT - self.radius
-            self.velocity_y *= -0.5
+    def _pixels_to_meters(self, position_pixels):
+        """Converts screen coordinates (pixels) to physics coordinates (meters)."""
+        return (position_pixels[0] / METERS_TO_PIXELS,
+                (self.screen_height - position_pixels[1]) / METERS_TO_PIXELS)
 
-    def draw(self, screen):
-        pygame.draw.circle(screen, BALL_COLOR, (int(self.x), int(self.y)), self.radius)
-
-    def set_velocity(self, start_pos, end_pos, power_factor=0.1):
-        # Calculate vector from start_pos to end_pos
-        dx = end_pos[0] - start_pos[0]
-        dy = end_pos[1] - start_pos[1]
-        self.velocity_x = dx * power_factor
-        self.velocity_y = dy * power_factor
-
-# GolfGreen class
-class GolfGreen:
-    def __init__(self, width, height, hole_pos=(0,0)):
-        self.width = width
-        self.height = height
-        self.elevation_map = [[0 for _ in range(width // 10)] for _ in range(height // 10)] # Dummy elevation map
-        self.hole_pos = hole_pos
-        self.hole_radius = 15
-
-    def draw(self, screen):
-        # Draw the green surface
+    def draw_green(self, green_physics_obj):
+        """Draws the golf green based on the physics object."""
         # For simplicity, using a solid color.
-        # To implement gradients for elevation:
-        # Iterate over sections of the screen, calculate a color based on dummy elevation_map value
-        # and use pygame.draw.rect or similar for smaller sections.
-        # Example:
-        # for y_idx, row in enumerate(self.elevation_map):
-        #     for x_idx, elevation in enumerate(row):
-        #         # Map elevation to color intensity
-        #         color_intensity = min(255, max(0, int(elevation * 10) + 50)) # Example mapping
-        #         color = (0, color_intensity, 0)
-        #         pygame.draw.rect(screen, color, (x_idx*10, y_idx*10, 10, 10))
-        pygame.draw.rect(screen, GREEN_LIGHT, (0, 0, self.width, self.height))
+        # Advanced drawing could involve sampling elevation_map_func from green_physics_obj
+        # and rendering a textured or shaded surface.
+        self.screen.fill(GREEN_LIGHT)
 
         # Draw the golf hole
-        pygame.draw.circle(screen, HOLE_COLOR, self.hole_pos, self.hole_radius)
+        hole_pos_pixels = self._meters_to_pixels(green_physics_obj.hole_position)
+        hole_radius_pixels = int(green_physics_obj.hole_radius * METERS_TO_PIXELS)
+        pygame.draw.circle(self.screen, HOLE_COLOR, hole_pos_pixels, hole_radius_pixels)
+    
+    def draw_ball(self, ball_physics_obj):
+        """Draws the golf ball based on the physics object."""
+        ball_pos_pixels = self._meters_to_pixels(ball_physics_obj.position)
+        ball_radius_pixels = int(ball_physics_obj.radius * METERS_TO_PIXELS)
+        pygame.draw.circle(self.screen, BALL_COLOR, ball_pos_pixels, ball_radius_pixels)
 
-    def get_elevation(self, x, y):
-        # In a real scenario, this would return elevation at (x,y)
-        return 0 # Placeholder
+    def draw_drag_indicator(self, ball_physics_obj):
+        """Draws the line indicating drag direction/force."""
+        if self.dragging and self.drag_start_pos:
+            pygame.draw.line(self.screen, RED, self.drag_start_pos, self.current_mouse_pos, 2)
 
-# Game setup
-ball = GolfBall(SCREEN_WIDTH // 4, SCREEN_HEIGHT // 2)
-green = GolfGreen(SCREEN_WIDTH, SCREEN_HEIGHT, hole_pos=(SCREEN_WIDTH * 3 // 4, SCREEN_HEIGHT // 2))
+            # Optional: draw an arrow head
+            dx = self.current_mouse_pos[0] - self.drag_start_pos[0]
+            dy = self.current_mouse_pos[1] - self.drag_start_pos[1]
+            if dx == 0 and dy == 0:
+                return # Avoid math.atan2(0,0)
+            angle = math.atan2(dy, dx)
+            arrow_length = 20
+            pygame.draw.line(self.screen, RED, self.current_mouse_pos,
+                             (self.current_mouse_pos[0] - arrow_length * math.cos(angle - math.pi / 6),
+                              self.current_mouse_pos[1] - arrow_length * math.sin(angle - math.pi / 6)), 2)
+            pygame.draw.line(self.screen, RED, self.current_mouse_pos,
+                             (self.current_mouse_pos[0] - arrow_length * math.cos(angle + math.pi / 6),
+                              self.current_mouse_pos[1] - arrow_length * math.sin(angle + math.pi / 6)), 2)
 
-# Game state
-dragging = False
-drag_start_pos = (0, 0)
-current_mouse_pos = (0, 0)
+    def display_message(self, message, position=(10, 10), color=BLACK):
+        """Displays a message on the screen."""
+        text_surface = self.font.render(message, True, color)
+        self.screen.blit(text_surface, position)
 
-# Main game loop
-running = True
-while running:
-    for event in pygame.event.get():
+    def update_display(self):
+        """Updates the full display Surface to the screen."""
+        pygame.display.flip()
+
+    def tick(self):
+        """Caps the frame rate and returns milliseconds since last tick."""
+        return self.clock.tick(FPS)
+
+    def handle_input_event(self, event, ball_physics_obj):
+        """Handles a single Pygame event. Returns a dictionary of actions if any."""
+        actions = {}
         if event.type == pygame.QUIT:
-            running = False
-        if event.type == pygame.MOUSEBUTTONDOWN:
+            actions['quit'] = True
+        
+        elif event.type == pygame.MOUSEBUTTONDOWN:
             if event.button == 1: # Left click
-                if ball.velocity_x == 0 and ball.velocity_y == 0: # Only start dragging if ball is stopped
-                    dragging = True
-                    drag_start_pos = event.pos
-                    current_mouse_pos = event.pos
-        if event.type == pygame.MOUSEBUTTONUP:
-            if event.button == 1 and dragging:
-                dragging = False
-                ball.set_velocity(drag_start_pos, current_mouse_pos, power_factor=0.08) # Adjust power_factor as needed
-        if event.type == pygame.MOUSEMOTION:
-            if dragging:
-                current_mouse_pos = event.pos
-        if event.type == pygame.KEYDOWN:
+                # Check if click is on the ball (in screen coordinates)
+                ball_pos_pixels = self._meters_to_pixels(ball_physics_obj.position)
+                ball_radius_pixels = int(ball_physics_obj.radius * METERS_TO_PIXELS)
+                
+                distance_to_ball_center = math.sqrt(
+                    (event.pos[0] - ball_pos_pixels[0])**2 +
+                    (event.pos[1] - ball_pos_pixels[1])**2
+                )
+                
+                # Only start dragging if ball is stopped and clicked on
+                # Check ball velocity from physics object
+                if np.linalg.norm(ball_physics_obj.velocity) < ball_physics_obj.stopped_threshold and \
+                   distance_to_ball_center <= ball_radius_pixels:
+                    self.dragging = True
+                    self.drag_start_pos = event.pos
+                    self.current_mouse_pos = event.pos
+
+        elif event.type == pygame.MOUSEBUTTONUP:
+            if event.button == 1 and self.dragging:
+                self.dragging = False
+                end_drag_pos = event.pos
+                if self.drag_start_pos:
+                    # Calculate force vector in pixels, then convert to meters for physics
+                    force_vector_pixels_x = self.drag_start_pos[0] - end_drag_pos[0]
+                    force_vector_pixels_y = self.drag_start_pos[1] - end_drag_pos[1]
+                    
+                    # A power factor might be needed here to convert drag distance to initial velocity magnitude
+                    # Let's say 10 pixels of drag = 1 m/s velocity, but this needs tuning.
+                    # Or, treat drag directly as force direction and magnitude.
+                    # For now, let's scale it based on pixels to meters directly.
+                    
+                    # Convert drag distance (pixels) to a force/impulse in meters/physics units
+                    # This power_factor needs to be tuned for a good feel.
+                    # Let's consider 100 pixels of drag maps to some 'impulse' that results in initial velocity.
+                    # The physics module expects a force or an initial velocity.
+                    # For simplicity, let's treat the drag as setting an initial velocity.
+                    # The magnitude of velocity will be proportional to the drag distance.
+                    
+                    # This is still a bit simplified. A better approach would be to
+                    # calculate an 'impulse' based on drag and then apply it to the ball.
+                    # For now, let's set velocity directly.
+                    
+                    # Convert drag vector from screen pixels to physics meters
+                    # Note the y-axis inversion for screen vs physics (if physics is bottom-left origin)
+                    initial_velocity_x = force_vector_pixels_x / (METERS_TO_PIXELS * 5) # Scale factor to get reasonable velocity
+                    initial_velocity_y = -force_vector_pixels_y / (METERS_TO_PIXELS * 5) # Invert Y and scale
+                    
+                    actions['set_ball_velocity'] = np.array([initial_velocity_x, initial_velocity_y])
+                self.drag_start_pos = None
+        
+        elif event.type == pygame.MOUSEMOTION:
+            if self.dragging:
+                self.current_mouse_pos = event.pos
+
+        elif event.type == pygame.KEYDOWN:
             if event.key == pygame.K_r: # Reset ball position
-                ball = GolfBall(SCREEN_WIDTH // 4, SCREEN_HEIGHT // 2)
-            if event.key == pygame.K_l: # Load new layout (simple cycle for now)
-                # This could involve changing green.hole_pos or even the elevation map
-                if green.hole_pos == (SCREEN_WIDTH * 3 // 4, SCREEN_HEIGHT // 2):
-                    green.hole_pos = (SCREEN_WIDTH // 2, SCREEN_HEIGHT // 4)
+                actions['reset_ball'] = True
+            if event.key == pygame.K_l: # Load new layout (for the green)
+                actions['new_layout'] = True # Signal to the simulator to change green layout
+        
+        return actions
+
+    def quit_pygame(self):
+        pygame.quit()
+
+if __name__ == '__main__':
+    # Simple test of the GUI Manager
+    # This block won't run when imported by chicken.py
+    # It demonstrates how GUIManager would be used in a main loop
+    from physics import GolfBall, GolfGreen, calculate_physics, check_ball_in_hole
+
+    def simple_elevation(x, y):
+        return 0.1 * x + 0.05 * y # Simple slope
+
+    gui_manager = GUIManager(SCREEN_WIDTH, SCREEN_HEIGHT)
+    
+    # Initialize physics objects for testing
+    physics_ball = GolfBall(x=0.5, y=0.5, radius=0.02135) # Meters
+    physics_green = GolfGreen(elevation_map_func=simple_elevation, hole_x=7.0, hole_y=4.0, hole_radius=0.1) # Meters
+
+    running = True
+    simulation_active = False # True when ball is moving
+    
+    while running:
+        dt_ms = gui_manager.tick()
+        dt_s = dt_ms / 1000.0 # Convert to seconds
+
+        for event in pygame.event.get():
+            actions = gui_manager.handle_input_event(event, physics_ball)
+            if 'quit' in actions:
+                running = False
+            if 'set_ball_velocity' in actions:
+                physics_ball.velocity = actions['set_ball_velocity']
+                simulation_active = True
+            if 'reset_ball' in actions:
+                physics_ball = GolfBall(x=0.5, y=0.5, radius=0.02135) # Reset ball
+                simulation_active = False
+            if 'new_layout' in actions:
+                # Example: change hole position
+                if np.array_equal(physics_green.hole_position, np.array([7.0, 4.0])):
+                    physics_green.hole_position = np.array([2.0, 6.0])
                 else:
-                    green.hole_pos = (SCREEN_WIDTH * 3 // 4, SCREEN_HEIGHT // 2)
+                    physics_green.hole_position = np.array([7.0, 4.0])
+
+        if simulation_active:
+            calculate_physics(physics_ball, physics_green, dt_s)
+            if check_ball_in_hole(physics_ball, physics_green):
+                print(f"Test: Ball in hole! Position: {physics_ball.position}")
+                simulation_active = False
+            elif np.linalg.norm(physics_ball.velocity) < physics_ball.stopped_threshold:
+                simulation_active = False
+        
+        gui_manager.screen.fill(WHITE) # Clear screen
+
+        gui_manager.draw_green(physics_green)
+        gui_manager.draw_ball(physics_ball)
+        gui_manager.draw_drag_indicator(physics_ball)
+
+        # Display some info
+        gui_manager.display_message(f"Ball Pos: ({physics_ball.position[0]:.2f}m, {physics_ball.position[1]:.2f}m)", (10,10))
+        gui_manager.display_message(f"Velocity: {np.linalg.norm(physics_ball.velocity):.2f} m/s", (10,40))
+        gui_manager.display_message(f"Dragging: {gui_manager.dragging}", (10,70))
 
 
-    # Game logic updates
-    ball.move()
+        gui_manager.update_display()
 
-    # Drawing
-    SCREEN.fill(WHITE) # Clear screen
-
-    green.draw(SCREEN)
-    ball.draw(SCREEN)
-
-    # Draw the velocity vector if dragging
-    if dragging:
-        pygame.draw.line(SCREEN, RED, drag_start_pos, current_mouse_pos, 2)
-        # Optional: draw an arrow head
-        # Calculate angle of line
-        dx = current_mouse_pos[0] - drag_start_pos[0]
-        dy = current_mouse_pos[1] - drag_start_pos[1]
-        angle = math.atan2(dy, dx)
-        arrow_length = 20
-        pygame.draw.line(SCREEN, RED, current_mouse_pos,
-                         (current_mouse_pos[0] - arrow_length * math.cos(angle - math.pi / 6),
-                          current_mouse_pos[1] - arrow_length * math.sin(angle - math.pi / 6)), 2)
-        pygame.draw.line(SCREEN, RED, current_mouse_pos,
-                         (current_mouse_pos[0] - arrow_length * math.cos(angle + math.pi / 6),
-                          current_mouse_pos[1] - arrow_length * math.sin(angle + math.pi / 6)), 2)
-
-
-    pygame.display.flip() # Update the full display Surface to the screen
-
-    # Cap the frame rate
-    pygame.time.Clock().tick(60)
-
-pygame.quit()
-sys.exit()
+    gui_manager.quit_pygame()
+    import sys
+    sys.exit()
