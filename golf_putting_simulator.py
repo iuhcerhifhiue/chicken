@@ -1,236 +1,173 @@
+import sys
 import pygame
-import math
 import numpy as np
 
-# --- Configuration ---
-SCREEN_WIDTH = 800
-SCREEN_HEIGHT = 600
-FPS = 60
-GREEN_COLOR_LOW = (0, 100, 0)   # Dark green for low elevation
-GREEN_COLOR_HIGH = (0, 200, 0)  # Bright green for high elevation
-HOLE_COLOR = (0, 0, 0)          # Black
-BALL_COLOR = (255, 255, 255)    # White
-BALL_RADIUS = 5
-HOLE_RADIUS = 10
+# Import physics components: GolfBall, GolfGreen classes, and physics calculation functions.
+from physics import GolfBall, GolfGreen, calculate_physics, check_ball_in_hole
 
-# --- GolfGreen Class ---
-class GolfGreen:
-    def __init__(self, width, height, num_points_x=50, num_points_y=50):
-        self.width = width
-        self.height = height
-        self.num_points_x = num_points_x
-        self.num_points_y = num_points_y
-        self.green_data = self._generate_flat_green()
-        self.ball_start_pos = (width // 4, height // 2)
-        self.hole_pos = (width * 3 // 4, height // 2)
+# Import GUI components: GUIManager class and screen dimensions for setup.
+from golf_simulator_gui import GUIManager, SCREEN_WIDTH, SCREEN_HEIGHT
 
-    def _generate_flat_green(self):
-        """Generates a flat green for initial testing."""
-        return np.zeros((self.num_points_y, self.num_points_x))
+# --- Elevation Map Functions ---
+# These functions define different golf green terrains by returning an elevation (z) for a given (x, y) coordinate.
+# They are now part of this module as they are directly used by the GolfPuttingSimulator for green initialization.
+def simple_elevation_flat(x, y):
+    """A completely flat green, returning a constant elevation of 0.0."""
+    return 0.0
 
-    def _generate_hills_green(self):
-        """Generates a green with some hills and valleys."""
-        green = np.zeros((self.num_points_y, self.num_points_x))
-        x = np.linspace(0, self.width, self.num_points_x)
-        y = np.linspace(0, self.height, self.num_points_y)
-        X, Y = np.meshgrid(x, y)
+def simple_elevation_slope(x, y):
+    """A simple linear slope across the green, gradually increasing elevation."""
+    return 0.05 * x + 0.03 * y  # Gentle slope in x and y
 
-        # Add some sine waves for elevation changes
-        green += 5 * np.sin(X / 50) * np.cos(Y / 50)
-        green += 3 * np.cos(X / 100 + Y / 70)
-        
-        # Normalize to a 0-1 range for color mapping
-        green = (green - np.min(green)) / (np.max(green) - np.min(green))
-        return green
-
-    def _generate_slope_green(self):
-        """Generates a green with a simple slope."""
-        green = np.zeros((self.num_points_y, self.num_points_x))
-        x_coords = np.linspace(0, 1, self.num_points_x)
-        for i in range(self.num_points_y):
-            green[i, :] = x_coords  # Simple slope from left (0) to right (1)
-        return green
-
-    def set_layout(self, layout_type):
-        if layout_type == 'flat':
-            self.green_data = self._generate_flat_green()
-        elif layout_type == 'hills':
-            self.green_data = self._generate_hills_green()
-        elif layout_type == 'slope':
-            self.green_data = self._generate_slope_green()
-        # Reset ball position when layout changes
-        self.ball_start_pos = (self.width // 4, self.height // 2)
-        self.hole_pos = (self.width * 3 // 4, self.height // 2)
-
-    def get_elevation(self, x, y):
-        """Returns the elevation at a given (x, y) coordinate."""
-        # Scale coordinates to green_data array indices
-        idx_x = int(np.clip(x / self.width * self.num_points_x, 0, self.num_points_x - 1))
-        idx_y = int(np.clip(y / self.height * self.num_points_y, 0, self.num_points_y - 1))
-        return self.green_data[idx_y, idx_x]
-
-    def draw(self, screen):
-        # Draw green with color gradient based on elevation
-        for y_idx in range(self.num_points_y):
-            for x_idx in range(self.num_points_x):
-                elevation_normalized = self.green_data[y_idx, x_idx]
-                
-                # Interpolate color between low and high
-                r = int(GREEN_COLOR_LOW[0] + elevation_normalized * (GREEN_COLOR_HIGH[0] - GREEN_COLOR_LOW[0]))
-                g = int(GREEN_COLOR_LOW[1] + elevation_normalized * (GREEN_COLOR_HIGH[1] - GREEN_COLOR_LOW[1]))
-                b = int(GREEN_COLOR_LOW[2] + elevation_normalized * (GREEN_COLOR_HIGH[2] - GREEN_COLOR_LOW[2]))
-                
-                color = (r, g, b)
-                
-                # Calculate screen coordinates for this point
-                rect_width = self.width / self.num_points_x
-                rect_height = self.height / self.num_points_y
-                
-                pygame.draw.rect(screen, color, 
-                                 (x_idx * rect_width, y_idx * rect_height, 
-                                  math.ceil(rect_width), math.ceil(rect_height)))
-        
-        # Draw the hole
-        pygame.draw.circle(screen, HOLE_COLOR, (int(self.hole_pos[0]), int(self.hole_pos[1])), HOLE_RADIUS)
+def simple_elevation_hill(x, y):
+    """A small hill or dip, with its peak/dip centered at (4.0, 3.0) meters."""
+    center_x, center_y = 4.0, 3.0  # Center of the green in meters
+    distance_from_center_sq = (x - center_x)**2 + (y - center_y)**2
+    return -0.01 * distance_from_center_sq + 0.1 # A slight peak at the center, then dips
 
 
-# --- GolfBall Class ---
-class GolfBall:
-    def __init__(self, x, y):
-        self.pos = np.array([float(x), float(y)])
-        self.velocity = np.array([0.0, 0.0])
-        self.radius = BALL_RADIUS
-        self.in_hole = False
+class GolfPuttingSimulator:
+    """
+    The core simulation class responsible for orchestrating the golf putting game.
+    It manages the game state, integrates physics and GUI, and controls the main game loop.
+    """
 
-    def update(self, dt, green):
-        if self.in_hole:
-            self.velocity = np.array([0.0, 0.0])
-            return
-
-        # Simple friction model (can be expanded with green elevation/slope later)
-        friction_coeff = 0.98 # Reduce velocity by 2% per frame
-        self.velocity *= friction_coeff
-
-        # Stop if velocity is very small
-        if np.linalg.norm(self.velocity) < 0.1:
-            self.velocity = np.array([0.0, 0.0])
-
-        self.pos += self.velocity * dt
-
-        # Check if ball is in hole
-        distance_to_hole = np.linalg.norm(self.pos - np.array(green.hole_pos))
-        if distance_to_hole < HOLE_RADIUS - self.radius:
-            self.in_hole = True
-            print("Ball in hole!")
-
-    def draw(self, screen):
-        if not self.in_hole:
-            pygame.draw.circle(screen, BALL_COLOR, (int(self.pos[0]), int(self.pos[1])), self.radius)
-
-
-# --- Main Game Class ---
-class GolfSimulator:
     def __init__(self):
-        pygame.init()
-        self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
-        pygame.display.set_caption("Golf Putting Simulator")
-        self.clock = pygame.time.Clock()
-        self.running = True
+        """Initializes the simulator, setting up the GUI, ball, and green."""
+        self.gui_manager = GUIManager(SCREEN_WIDTH, SCREEN_HEIGHT)
 
-        self.green = GolfGreen(SCREEN_WIDTH, SCREEN_HEIGHT)
-        self.ball = GolfBall(self.green.ball_start_pos[0], self.green.ball_start_pos[1])
+        # Initialize physics objects
+        # Ball starts at (1.0m, 3.0m) within the green's coordinate system.
+        self.ball = GolfBall(x=1.0, y=3.0)
 
-        self.putting_mode = False
-        self.putt_start_pos = None
-        self.putt_current_pos = None
+        # Define available elevation functions and set the initial green layout.
+        self.current_elevation_func_idx = 0
+        self.elevation_functions = [
+            simple_elevation_flat,
+            simple_elevation_slope,
+            simple_elevation_hill
+        ]
+        self.green = self._initialize_green() # Initialize with the default green layout.
+
+        self.running = False  # Flag to control the main game loop.
+        self.game_over = False # Flag to indicate if the ball is in the hole or stopped.
+
+    def _initialize_green(self, layout_index=None):
+        """
+        Initializes or re-initializes the GolfGreen with a specific layout.
+        Cycles through predefined elevation functions.
+        """
+        if layout_index is None:
+            layout_index = self.current_elevation_func_idx # Use current layout if none specified.
         
-        self.font = pygame.font.Font(None, 36)
+        # Cycle the layout index to stay within the bounds of elevation_functions.
+        self.current_elevation_func_idx = layout_index % len(self.elevation_functions)
+        elevation_func = self.elevation_functions[self.current_elevation_func_idx]
 
-    def _handle_input(self):
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                self.running = False
-            elif event.type == pygame.MOUSEBUTTONDOWN:
-                if event.button == 1: # Left click
-                    if not self.putting_mode and np.linalg.norm(self.ball.velocity) < 0.1: # Only putt if ball is stopped
-                        self.putting_mode = True
-                        self.putt_start_pos = event.pos
-                        self.putt_current_pos = event.pos
-            elif event.type == pygame.MOUSEMOTION:
-                if self.putting_mode:
-                    self.putt_current_pos = event.pos
-            elif event.type == pygame.MOUSEBUTTONUP:
-                if event.button == 1 and self.putting_mode:
-                    self.putting_mode = False
-                    if self.putt_start_pos and self.putt_current_pos:
-                        # Calculate putt vector (from current mouse pos to start pos)
-                        # This makes dragging away from the ball set the direction of the putt
-                        putt_vector = np.array(self.putt_start_pos) - np.array(self.putt_current_pos)
-                        
-                        # Scale velocity based on drag distance
-                        putt_strength = np.linalg.norm(putt_vector) * 0.1 # Adjust multiplier for sensitivity
-                        
-                        if putt_strength > 0:
-                            # Apply velocity
-                            self.ball.velocity = (putt_vector / np.linalg.norm(putt_vector)) * putt_strength
-                            self.ball.in_hole = False # Reset in_hole state when a new putt is made
-            elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_1:
-                    self.green.set_layout('flat')
-                    self.ball = GolfBall(self.green.ball_start_pos[0], self.green.ball_start_pos[1])
-                elif event.key == pygame.K_2:
-                    self.green.set_layout('hills')
-                    self.ball = GolfBall(self.green.ball_start_pos[0], self.green.ball_start_pos[1])
-                elif event.key == pygame.K_3:
-                    self.green.set_layout('slope')
-                    self.ball = GolfBall(self.green.ball_start_pos[0], self.green.ball_start_pos[1])
-                elif event.key == pygame.K_r: # Reset ball position
-                    self.ball = GolfBall(self.green.ball_start_pos[0], self.green.ball_start_pos[1])
-                    self.ball.in_hole = False
+        # Default hole position for a new green layout.
+        hole_x = 7.0
+        hole_y = 3.0
+        
+        # If re-initializing the *same* layout (e.g., after a ball reset),
+        # preserve the existing hole position. Otherwise, set default for new layouts.
+        if hasattr(self, 'green') and layout_index == self.current_elevation_func_idx: 
+            hole_x = self.green.hole_position[0]
+            hole_y = self.green.hole_position[1]
+        else: 
+            # Specific default hole positions for different pre-defined layouts.
+            if self.current_elevation_func_idx == 1: # Slope green
+                hole_x = 7.5
+                hole_y = 5.0
+            elif self.current_elevation_func_idx == 2: # Hill green
+                hole_x = 6.0
+                hole_y = 2.0
 
+        # Assuming a green size of 10m x 7.5m (corresponding to 800x600 pixels with METERS_TO_PIXELS=80)
+        return GolfGreen(elevation_map_func=elevation_func, hole_x=hole_x, hole_y=hole_y,
+                         x_min=0.0, x_max=SCREEN_WIDTH / self.gui_manager.METERS_TO_PIXELS,
+                         y_min=0.0, y_max=SCREEN_HEIGHT / self.gui_manager.METERS_TO_PIXELS)
 
-    def _update_game_state(self, dt):
-        self.ball.update(dt, self.green)
-
-    def _draw_elements(self):
-        self.screen.fill((0, 0, 0))  # Clear screen with black
-
-        self.green.draw(self.screen)
-        self.ball.draw(self.screen)
-
-        # Draw putting line if in putting mode and ball is stopped
-        if self.putting_mode and self.putt_start_pos and self.putt_current_pos and np.linalg.norm(self.ball.velocity) < 0.1:
-            pygame.draw.line(self.screen, (255, 255, 255), self.ball.pos, self.putt_current_pos, 2)
-            # Draw a directional arrow (simplified)
-            arrow_length = 20
-            direction = np.array(self.ball.pos) - np.array(self.putt_current_pos)
-            if np.linalg.norm(direction) > 0:
-                direction = direction / np.linalg.norm(direction)
-                end_point = self.ball.pos + direction * arrow_length
-                pygame.draw.line(self.screen, (255, 0, 0), self.ball.pos, end_point, 3) # Red arrow
-
-        # Display instructions
-        instruction_text = self.font.render("1: Flat, 2: Hills, 3: Slope, R: Reset Ball, Drag: Putt", True, (255, 255, 255))
-        self.screen.blit(instruction_text, (10, 10))
-
-        if self.ball.in_hole:
-            win_text = self.font.render("Ball in Hole! Press 'R' to reset or change layout.", True, (255, 255, 0))
-            text_rect = win_text.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2))
-            self.screen.blit(win_text, text_rect)
-
-
-        pygame.display.flip()
+    def _reset_ball(self):
+        """Resets the ball to its initial starting position and clears its velocity."""
+        self.ball = GolfBall(x=1.0, y=3.0) # Reset to initial physics position.
+        self.game_over = False # Allow new strokes after reset.
 
     def run(self):
+        """
+        The main simulation loop of the game.
+        This loop continuously handles user input, updates the physics state,
+        and renders the current game scene until the application is closed.
+        """
+        self.running = True
         while self.running:
-            dt = self.clock.tick(FPS) / 1000.0 # Delta time in seconds
-            self._handle_input()
-            self._update_game_state(dt)
-            self._draw_elements()
+            dt_ms = self.gui_manager.tick() # Get elapsed time in milliseconds for frame rate capping.
+            dt_s = dt_ms / 1000.0          # Convert to seconds for physics calculations.
 
-        pygame.quit()
+            # --- Event Handling ---
+            # Process all pending Pygame events.
+            for event in pygame.event.get():
+                actions = self.gui_manager.handle_input_event(event, self.ball)
+                
+                if 'quit' in actions:
+                    self.running = False
+                
+                if 'set_ball_velocity' in actions and not self.game_over:
+                    self.ball.velocity = actions['set_ball_velocity']
+                
+                if 'reset_ball' in actions:
+                    self._reset_ball()
+                    # Re-initialize green to refresh internal state, but keep the same layout and hole position.
+                    self.green = self._initialize_green(self.current_elevation_func_idx)
 
+                if 'next_layout' in actions:
+                    self._reset_ball()
+                    self.green = self._initialize_green(self.current_elevation_func_idx + 1) # Cycle to next layout.
 
-if __name__ == "__main__":
-    game = GolfSimulator()
-    game.run()
+                if 'set_hole_position' in actions:
+                    new_hole_pos = actions['set_hole_position']
+                    self.green.hole_position = new_hole_pos # Update the existing green's hole position.
+                    print(f"Hole position updated to: {new_hole_pos}") # Log the change.
+
+                if 'mode_change_message' in actions:
+                    print(actions['mode_change_message']) # Log messages related to mode changes.
+
+            # --- Physics Update ---
+            # Physics only updates if the ball is currently moving and the game is not over.
+            if np.linalg.norm(self.ball.velocity) > self.ball.stopped_threshold and not self.game_over:
+                calculate_physics(self.ball, self.green, dt_s)
+
+                # Check if the ball has entered the hole after physics update.
+                if check_ball_in_hole(self.ball, self.green):
+                    print("Ball in hole! You win!")
+                    self.game_over = True # End the current game.
+            elif np.linalg.norm(self.ball.velocity) <= self.ball.stopped_threshold and not self.game_over:
+                # If the ball has just come to a stop (and was not already game over),
+                # explicitly set its velocity to zero to ensure complete stop for the next stroke.
+                self.ball.velocity = np.array([0.0, 0.0])
+
+            # --- Rendering ---
+            # Draw the game elements using the GUI manager.
+            self.gui_manager.draw_green(self.green)
+            self.gui_manager.draw_ball(self.ball)
+            self.gui_manager.draw_drag_indicator(self.ball)
+
+            # Display various informational messages on the screen.
+            self.gui_manager.display_message(f"Ball Pos: ({self.ball.position[0]:.2f}m, {self.ball.position[1]:.2f}m)", (10, 10))
+            self.gui_manager.display_message(f"Velocity: {np.linalg.norm(self.ball.velocity):.2f} m/s", (10, 40))
+            self.gui_manager.display_message(f"Layout: {self.current_elevation_func_idx + 1}/{len(self.elevation_functions)} (L to change)", (10, 70))
+            self.gui_manager.display_message("H to Toggle Hole Editing Mode", (10, 100))
+
+            # Display game over message if applicable.
+            if self.game_over:
+                self.gui_manager.display_message("GAME OVER - Ball in Hole! (Press 'R' to Reset)", (SCREEN_WIDTH // 2 - 200, SCREEN_HEIGHT // 2), (0,0,255))
+
+            # Display hole editing mode specific messages if active.
+            if self.gui_manager.editing_hole:
+                current_mouse_pos_meters = self.gui_manager._pixels_to_meters(pygame.mouse.get_pos())
+                self.gui_manager.display_message(f"HOLE EDITING MODE: ON - Click to place hole", (SCREEN_WIDTH // 2 - 200, 10), color=(0, 0, 255), font_size="normal")
+                self.gui_manager.display_message(f"Mouse (m): ({current_mouse_pos_meters[0]:.2f}, {current_mouse_pos_meters[1]:.2f})", (SCREEN_WIDTH // 2 - 200, 40), color=(0, 0, 255), font_size="small")
+
+            self.gui_manager.update_display() # Refresh the display.
+
+        self.gui_manager.quit_pygame() # Clean up Pygame resources upon exiting the loop.
+        sys.exit() # Terminate the application.
