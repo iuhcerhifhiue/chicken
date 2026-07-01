@@ -11,12 +11,14 @@ FPS = 60
 WHITE = (255, 255, 255)
 GREEN_DARK = (0, 100, 0)
 GREEN_LIGHT = (0, 150, 0)
+GREEN_MEDIUM = (0, 125, 0) # Added for gradient
 BALL_COLOR = (200, 200, 200) # Light grey for the ball
 HOLE_COLOR = (0, 0, 0) # Black for the hole
 RED = (255, 0, 0) # For velocity vector
+BLACK = (0, 0, 0) # For text
+BLUE = (0, 0, 255) # For hole editing
 
 # Scale factor from physics coordinates (meters) to screen coordinates (pixels)
-# Assuming 1 meter = 100 pixels, adjust as necessary
 METERS_TO_PIXELS = 100
 
 class GUIManager:
@@ -28,25 +30,27 @@ class GUIManager:
         pygame.display.set_caption("Golf Putting Simulator")
         self.clock = pygame.time.Clock()
         self.font = pygame.font.Font(None, 36) # For displaying text
+        self.small_font = pygame.font.Font(None, 24) # For smaller text
 
         # State for dragging input
         self.dragging = False
         self.drag_start_pos = (0, 0) # Screen coordinates
         self.current_mouse_pos = (0, 0) # Screen coordinates
 
+        # State for hole editing mode
+        self.editing_hole = False
+
+        # Pre-calculate elevation range for color mapping (assuming a typical green size)
+        # This can be made more dynamic by sampling the current green.
+        self.min_elevation = -0.5 # meters
+        self.max_elevation = 0.5  # meters
+        
+        # Grid density for drawing green (e.g., every 5 pixels)
+        self.green_draw_grid_spacing = 5
+
     def _meters_to_pixels(self, position_meters):
         """Converts physics coordinates (meters) to screen coordinates (pixels)."""
-        # Assuming origin (0,0) for physics is bottom-left and screen origin (0,0) is top-left
-        # and also scaling for the screen size.
-        # This conversion might need careful adjustment based on the physics module's coordinate system.
-        # For simplicity, let's assume physics (0,0) maps to screen (0, SCREEN_HEIGHT) or similar,
-        # and scale appropriately.
-        # Let's map physics (0,0) to screen (50, SCREEN_HEIGHT - 50) for a border,
-        # and scale such that 1m = METERS_TO_PIXELS pixels.
-        # This is a placeholder and will likely need tuning.
-        
-        # Simple direct mapping for now, assuming physics coordinates are somewhat aligned with screen.
-        # If physics coordinates are small (e.g., 0-10m) and screen is 0-800 pixels:
+        # Physics (0,0) is bottom-left, screen (0,0) is top-left
         return (int(position_meters[0] * METERS_TO_PIXELS), 
                 int(self.screen_height - (position_meters[1] * METERS_TO_PIXELS)))
 
@@ -56,11 +60,57 @@ class GUIManager:
                 (self.screen_height - position_pixels[1]) / METERS_TO_PIXELS)
 
     def draw_green(self, green_physics_obj):
-        """Draws the golf green based on the physics object."""
-        # For simplicity, using a solid color.
-        # Advanced drawing could involve sampling elevation_map_func from green_physics_obj
-        # and rendering a textured or shaded surface.
-        self.screen.fill(GREEN_LIGHT)
+        """Draws the golf green based on the physics object, with elevation-based shading."""
+        # Calculate min/max elevation dynamically for better color mapping
+        # This can be expensive, so doing it once per green change might be better
+        # For now, let's sample a grid and find min/max
+        # For performance, only sample a limited area or precompute
+        # For this iteration, let's keep the fixed range or a simplified dynamic sampling.
+
+        # Simplified dynamic min/max by sampling corners and center for typical green dimensions
+        sample_points = [
+            (0, 0), (green_physics_obj.hole_position[0] * 2, 0),
+            (0, green_physics_obj.hole_position[1] * 2), 
+            (green_physics_obj.hole_position[0] * 2, green_physics_obj.hole_position[1] * 2),
+            (green_physics_obj.hole_position[0], green_physics_obj.hole_position[1])
+        ]
+        
+        elevations = []
+        for x, y in sample_points:
+            # Ensure sample points are within a reasonable range for elevation_map_func
+            # Assuming green typically spans from (0,0) to (SCREEN_WIDTH/METERS_TO_PIXELS, SCREEN_HEIGHT/METERS_TO_PIXELS)
+            x = max(0.0, min(x, self.screen_width / METERS_TO_PIXELS))
+            y = max(0.0, min(y, self.screen_height / METERS_TO_PIXELS))
+            elevations.append(green_physics_obj.get_elevation(x, y))
+
+        if elevations:
+            dynamic_min_elevation = min(elevations)
+            dynamic_max_elevation = max(elevations)
+        else:
+            dynamic_min_elevation = self.min_elevation
+            dynamic_max_elevation = self.max_elevation
+            
+        elevation_range = dynamic_max_elevation - dynamic_min_elevation
+        if elevation_range == 0: elevation_range = 1 # Avoid division by zero for flat greens
+
+        # Draw the green using a grid of rectangles, colored by elevation
+        for x_pixel in range(0, self.screen_width, self.green_draw_grid_spacing):
+            for y_pixel in range(0, self.screen_height, self.green_draw_grid_spacing):
+                x_meter, y_meter = self._pixels_to_meters((x_pixel, y_pixel))
+                elevation = green_physics_obj.get_elevation(x_meter, y_meter)
+
+                # Normalize elevation to a 0-1 range based on min/max
+                normalized_elevation = (elevation - dynamic_min_elevation) / elevation_range
+                
+                # Map normalized elevation to a color (e.g., darker green for lower, lighter for higher)
+                # Interpolate between GREEN_DARK and GREEN_LIGHT
+                r = int(GREEN_DARK[0] + normalized_elevation * (GREEN_LIGHT[0] - GREEN_DARK[0]))
+                g = int(GREEN_DARK[1] + normalized_elevation * (GREEN_LIGHT[1] - GREEN_DARK[1]))
+                b = int(GREEN_DARK[2] + normalized_elevation * (GREEN_LIGHT[2] - GREEN_DARK[2]))
+                color = (r, g, b)
+
+                pygame.draw.rect(self.screen, color, (x_pixel, y_pixel, self.green_draw_grid_spacing, self.green_draw_grid_spacing))
+
 
         # Draw the golf hole
         hole_pos_pixels = self._meters_to_pixels(green_physics_obj.hole_position)
@@ -92,9 +142,12 @@ class GUIManager:
                              (self.current_mouse_pos[0] - arrow_length * math.cos(angle + math.pi / 6),
                               self.current_mouse_pos[1] - arrow_length * math.sin(angle + math.pi / 6)), 2)
 
-    def display_message(self, message, position=(10, 10), color=BLACK):
+    def display_message(self, message, position=(10, 10), color=BLACK, font_size="normal"):
         """Displays a message on the screen."""
-        text_surface = self.font.render(message, True, color)
+        if font_size == "small":
+            text_surface = self.small_font.render(message, True, color)
+        else:
+            text_surface = self.font.render(message, True, color)
         self.screen.blit(text_surface, position)
 
     def update_display(self):
@@ -113,25 +166,31 @@ class GUIManager:
         
         elif event.type == pygame.MOUSEBUTTONDOWN:
             if event.button == 1: # Left click
-                # Check if click is on the ball (in screen coordinates)
-                ball_pos_pixels = self._meters_to_pixels(ball_physics_obj.position)
-                ball_radius_pixels = int(ball_physics_obj.radius * METERS_TO_PIXELS)
+                mouse_pos_meters = self._pixels_to_meters(event.pos)
                 
-                distance_to_ball_center = math.sqrt(
-                    (event.pos[0] - ball_pos_pixels[0])**2 +
-                    (event.pos[1] - ball_pos_pixels[1])**2
-                )
-                
-                # Only start dragging if ball is stopped and clicked on
-                # Check ball velocity from physics object
-                if np.linalg.norm(ball_physics_obj.velocity) < ball_physics_obj.stopped_threshold and \
-                   distance_to_ball_center <= ball_radius_pixels:
-                    self.dragging = True
-                    self.drag_start_pos = event.pos
-                    self.current_mouse_pos = event.pos
+                if self.editing_hole:
+                    actions['set_hole_position'] = np.array(mouse_pos_meters)
+                    # Optional: Exit editing mode after setting hole
+                    # self.editing_hole = False
+                else:
+                    # Check if click is on the ball (in screen coordinates)
+                    ball_pos_pixels = self._meters_to_pixels(ball_physics_obj.position)
+                    ball_radius_pixels = int(ball_physics_obj.radius * METERS_TO_PIXELS)
+                    
+                    distance_to_ball_center = math.sqrt(
+                        (event.pos[0] - ball_pos_pixels[0])**2 +
+                        (event.pos[1] - ball_pos_pixels[1])**2
+                    )
+                    
+                    # Only start dragging if ball is stopped and clicked on
+                    if np.linalg.norm(ball_physics_obj.velocity) < ball_physics_obj.stopped_threshold and \
+                       distance_to_ball_center <= ball_radius_pixels:
+                        self.dragging = True
+                        self.drag_start_pos = event.pos
+                        self.current_mouse_pos = event.pos
 
         elif event.type == pygame.MOUSEBUTTONUP:
-            if event.button == 1 and self.dragging:
+            if event.button == 1 and self.dragging and not self.editing_hole:
                 self.dragging = False
                 end_drag_pos = event.pos
                 if self.drag_start_pos:
@@ -139,27 +198,13 @@ class GUIManager:
                     force_vector_pixels_x = self.drag_start_pos[0] - end_drag_pos[0]
                     force_vector_pixels_y = self.drag_start_pos[1] - end_drag_pos[1]
                     
-                    # A power factor might be needed here to convert drag distance to initial velocity magnitude
-                    # Let's say 10 pixels of drag = 1 m/s velocity, but this needs tuning.
-                    # Or, treat drag directly as force direction and magnitude.
-                    # For now, let's scale it based on pixels to meters directly.
-                    
-                    # Convert drag distance (pixels) to a force/impulse in meters/physics units
-                    # This power_factor needs to be tuned for a good feel.
-                    # Let's consider 100 pixels of drag maps to some 'impulse' that results in initial velocity.
-                    # The physics module expects a force or an initial velocity.
-                    # For simplicity, let's treat the drag as setting an initial velocity.
-                    # The magnitude of velocity will be proportional to the drag distance.
-                    
-                    # This is still a bit simplified. A better approach would be to
-                    # calculate an 'impulse' based on drag and then apply it to the ball.
-                    # For now, let's set velocity directly.
-                    
                     # Convert drag vector from screen pixels to physics meters
                     # Note the y-axis inversion for screen vs physics (if physics is bottom-left origin)
-                    initial_velocity_x = force_vector_pixels_x / (METERS_TO_PIXELS * 5) # Scale factor to get reasonable velocity
-                    initial_velocity_y = -force_vector_pixels_y / (METERS_TO_PIXELS * 5) # Invert Y and scale
-                    
+                    # Scale factor needs tuning for desired putt strength
+                    velocity_scale_factor = METERS_TO_PIXELS * 5 # Original was 5, now adjust if needed
+                    initial_velocity_x = force_vector_pixels_x / velocity_scale_factor
+                    initial_velocity_y = -force_vector_pixels_y / velocity_scale_factor # Invert Y
+
                     actions['set_ball_velocity'] = np.array([initial_velocity_x, initial_velocity_y])
                 self.drag_start_pos = None
         
@@ -170,8 +215,11 @@ class GUIManager:
         elif event.type == pygame.KEYDOWN:
             if event.key == pygame.K_r: # Reset ball position
                 actions['reset_ball'] = True
-            if event.key == pygame.K_l: # Load new layout (for the green)
-                actions['new_layout'] = True # Signal to the simulator to change green layout
+            if event.key == pygame.K_l: # Load next green layout
+                actions['next_layout'] = True # Changed from 'new_layout' for clarity
+            if event.key == pygame.K_h: # Toggle hole editing mode
+                self.editing_hole = not self.editing_hole
+                actions['mode_change_message'] = f"Hole Editing Mode: {'ON' if self.editing_hole else 'OFF'}"
         
         return actions
 
@@ -180,8 +228,6 @@ class GUIManager:
 
 if __name__ == '__main__':
     # Simple test of the GUI Manager
-    # This block won't run when imported by chicken.py
-    # It demonstrates how GUIManager would be used in a main loop
     from physics import GolfBall, GolfGreen, calculate_physics, check_ball_in_hole
 
     def simple_elevation(x, y):
@@ -190,55 +236,57 @@ if __name__ == '__main__':
     gui_manager = GUIManager(SCREEN_WIDTH, SCREEN_HEIGHT)
     
     # Initialize physics objects for testing
-    physics_ball = GolfBall(x=0.5, y=0.5, radius=0.02135) # Meters
-    physics_green = GolfGreen(elevation_map_func=simple_elevation, hole_x=7.0, hole_y=4.0, hole_radius=0.1) # Meters
+    test_green = GolfGreen(elevation_map_func=simple_elevation, hole_x=7.0, hole_y=3.0)
+    test_ball = GolfBall(x=1.0, y=3.0)
 
     running = True
-    simulation_active = False # True when ball is moving
-    
     while running:
         dt_ms = gui_manager.tick()
-        dt_s = dt_ms / 1000.0 # Convert to seconds
+        dt_s = dt_ms / 1000.0
 
         for event in pygame.event.get():
-            actions = gui_manager.handle_input_event(event, physics_ball)
+            actions = gui_manager.handle_input_event(event, test_ball)
             if 'quit' in actions:
                 running = False
             if 'set_ball_velocity' in actions:
-                physics_ball.velocity = actions['set_ball_velocity']
-                simulation_active = True
+                test_ball.velocity = actions['set_ball_velocity']
             if 'reset_ball' in actions:
-                physics_ball = GolfBall(x=0.5, y=0.5, radius=0.02135) # Reset ball
-                simulation_active = False
-            if 'new_layout' in actions:
-                # Example: change hole position
-                if np.array_equal(physics_green.hole_position, np.array([7.0, 4.0])):
-                    physics_green.hole_position = np.array([2.0, 6.0])
-                else:
-                    physics_green.hole_position = np.array([7.0, 4.0])
+                test_ball = GolfBall(x=1.0, y=3.0)
+            if 'next_layout' in actions:
+                # In a real sim, this would load a new green, for test we just acknowledge
+                print("Next layout requested (test mode)")
+            if 'set_hole_position' in actions:
+                test_green.hole_position = actions['set_hole_position']
+                print(f"Hole position set to: {test_green.hole_position}")
+            if 'mode_change_message' in actions:
+                print(actions['mode_change_message'])
 
-        if simulation_active:
-            calculate_physics(physics_ball, physics_green, dt_s)
-            if check_ball_in_hole(physics_ball, physics_green):
-                print(f"Test: Ball in hole! Position: {physics_ball.position}")
-                simulation_active = False
-            elif np.linalg.norm(physics_ball.velocity) < physics_ball.stopped_threshold:
-                simulation_active = False
-        
-        gui_manager.screen.fill(WHITE) # Clear screen
 
-        gui_manager.draw_green(physics_green)
-        gui_manager.draw_ball(physics_ball)
-        gui_manager.draw_drag_indicator(physics_ball)
+        # Physics update (simplified for GUI test)
+        if np.linalg.norm(test_ball.velocity) > 0.01: # Check against a small threshold
+             calculate_physics(test_ball, test_green, dt_s)
+             if check_ball_in_hole(test_ball, test_green):
+                 print("Ball in hole! (test mode)")
+                 test_ball.velocity = np.array([0.0, 0.0]) # Stop ball for test
 
-        # Display some info
-        gui_manager.display_message(f"Ball Pos: ({physics_ball.position[0]:.2f}m, {physics_ball.position[1]:.2f}m)", (10,10))
-        gui_manager.display_message(f"Velocity: {np.linalg.norm(physics_ball.velocity):.2f} m/s", (10,40))
-        gui_manager.display_message(f"Dragging: {gui_manager.dragging}", (10,70))
+        gui_manager.screen.fill(GREEN_MEDIUM) # Clear with a base green before drawing detailed green
+        gui_manager.draw_green(test_green)
+        gui_manager.draw_ball(test_ball)
+        gui_manager.draw_drag_indicator(test_ball)
+
+        # Display messages
+        gui_manager.display_message(f"Ball Pos: ({test_ball.position[0]:.2f}m, {test_ball.position[1]:.2f}m)", (10, 10))
+        gui_manager.display_message(f"Velocity: {np.linalg.norm(test_ball.velocity):.2f} m/s", (10, 40))
+        gui_manager.display_message("Press 'R' to Reset Ball, 'L' for Next Layout (test)", (10, SCREEN_HEIGHT - 30), font_size="small")
+        gui_manager.display_message("Press 'H' to Toggle Hole Editing Mode", (10, SCREEN_HEIGHT - 60), font_size="small")
+
+        if gui_manager.editing_hole:
+            current_mouse_pos_meters = gui_manager._pixels_to_meters(pygame.mouse.get_pos())
+            gui_manager.display_message(f"HOLE EDITING MODE: ON - Click to place hole", (SCREEN_WIDTH // 2 - 200, 10), color=BLUE)
+            gui_manager.display_message(f"Mouse (m): ({current_mouse_pos_meters[0]:.2f}, {current_mouse_pos_meters[1]:.2f})", (SCREEN_WIDTH // 2 - 200, 40), color=BLUE, font_size="small")
 
 
         gui_manager.update_display()
 
     gui_manager.quit_pygame()
-    import sys
-    sys.exit()
+    
