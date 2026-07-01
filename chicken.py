@@ -1,151 +1,130 @@
-'''
-chicken.py
-
-This is the main entry point for the Python golf putting simulator.
-It defines the core classes for the simulation and sets up basic Pygame rendering.
-'''
-
-import pygame
 import sys
-import math
+import pygame
+import numpy as np
 
-# --- Constants ---
-SCREEN_WIDTH = 800
-SCREEN_HEIGHT = 600
-FPS = 60
+# Import physics components
+from physics import GolfBall, GolfGreen, calculate_physics, check_ball_in_hole
 
-WHITE = (255, 255, 255)
-GREEN = (0, 128, 0)
-BLACK = (0, 0, 0)
-RED = (255, 0, 0)
-
-# --- Classes ---
-
-class GolfBall:
-    """Represents the golf ball in the simulation."""
-    def __init__(self, x, y, radius=5, color=WHITE):
-        self.x = x
-        self.y = y
-        self.radius = radius
-        self.color = color
-        self.velocity_x = 0.0
-        self.velocity_y = 0.0
-
-    def update(self, dt):
-        """Update ball position based on velocity and apply friction."""
-        # Placeholder for physics logic (friction, gravity if applicable, etc.)
-        self.x += self.velocity_x * dt
-        self.y += self.velocity_y * dt
-
-        # Apply simple friction (reduce velocity over time)
-        friction_coeff = 0.98 # Adjust as needed
-        self.velocity_x *= friction_coeff
-        self.velocity_y *= friction_coeff
-
-        # Stop if velocity is very low
-        if math.sqrt(self.velocity_x**2 + self.velocity_y**2) < 0.1:
-            self.velocity_x = 0.0
-            self.velocity_y = 0.0
-
-    def draw(self, screen):
-        """Draw the golf ball on the screen."""
-        pygame.draw.circle(screen, self.color, (int(self.x), int(self.y)), self.radius)
+# Import GUI components
+from golf_simulator_gui import GUIManager, SCREEN_WIDTH, SCREEN_HEIGHT
 
 
-class GolfGreen:
-    """Represents the putting green, including the hole."""
-    def __init__(self, width, height, hole_pos=(0,0), hole_radius=10):
-        self.width = width
-        self.height = height
-        self.hole_pos = hole_pos
-        self.hole_radius = hole_radius
+# --- Elevation Map Functions (can be moved to a dedicated module later if complex) ---
+def simple_elevation_flat(x, y):
+    """A completely flat green."""
+    return 0.0
 
-    def draw(self, screen):
-        """Draw the green and the hole."""
-        # Draw the green background
-        screen.fill(GREEN)
-        # Draw the hole
-        pygame.draw.circle(screen, BLACK, self.hole_pos, self.hole_radius)
-        pygame.draw.circle(screen, WHITE, self.hole_pos, self.hole_radius - 2) # Inner ring for visual effect
+def simple_elevation_slope(x, y):
+    """A simple linear slope across the green."""
+    return 0.05 * x + 0.03 * y  # Gentle slope in x and y
+
+def simple_elevation_hill(x, y):
+    """A small hill or dip in the middle."""
+    center_x, center_y = 4.0, 3.0  # Center of the green in meters
+    distance_from_center_sq = (x - center_x)**2 + (y - center_y)**2
+    return -0.01 * distance_from_center_sq + 0.1 # A slight peak at the center, then dips
 
 
 class Simulator:
-    """Manages the overall simulation, game state, and rendering."""
+    """Manages the overall golf putting simulation, orchestrating physics and GUI."""
+
     def __init__(self):
-        pygame.init()
-        self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
-        pygame.display.set_caption("Golf Putting Simulator")
-        self.clock = pygame.time.Clock()
+        self.gui_manager = GUIManager(SCREEN_WIDTH, SCREEN_HEIGHT)
+
+        # Initialize physics objects
+        # Starting ball position (meters), adjusting for screen coordinate mapping
+        # assuming physics (0,0) is bottom-left of the usable area and ball starts near GUI left edge.
+        # Let's say the green is roughly 8m x 6m (based on SCREEN_WIDTH/HEIGHT and METERS_TO_PIXELS=100)
+        self.ball = GolfBall(x=1.0, y=3.0) # Start 1m from left, 3m from bottom (approx middle height)
+        self.current_elevation_func_idx = 0
+        self.elevation_functions = [
+            simple_elevation_flat,
+            simple_elevation_slope,
+            simple_elevation_hill
+        ]
+        self.green = self._initialize_green()
         self.running = False
+        self.game_over = False
 
-        self.golf_green = GolfGreen(SCREEN_WIDTH, SCREEN_HEIGHT, hole_pos=(SCREEN_WIDTH - 100, SCREEN_HEIGHT // 2))
-        self.golf_ball = GolfBall(x=100, y=SCREEN_HEIGHT // 2)
+    def _initialize_green(self, layout_index=0):
+        """Initializes or re-initializes the GolfGreen with a specific layout."""
+        elevation_func = self.elevation_functions[layout_index % len(self.elevation_functions)]
+        # Hole position in meters (e.g., 7m from left, 3m from bottom, adjusted to be towards the right)
+        hole_x = 7.0
+        hole_y = 3.0
+        # Example: vary hole position for different layouts
+        if layout_index == 1: # Slope
+            hole_x = 7.5
+            hole_y = 5.0
+        elif layout_index == 2: # Hill
+            hole_x = 6.0
+            hole_y = 2.0
 
-        self.dragging_ball = False
-        self.start_drag_pos = None
+        self.current_elevation_func_idx = layout_index % len(self.elevation_functions)
+        return GolfGreen(elevation_map_func=elevation_func, hole_x=hole_x, hole_y=hole_y)
 
-    def handle_input(self, event):
-        """Handle user input for striking the ball."""
-        if event.type == pygame.MOUSEBUTTONDOWN:
-            if event.button == 1: # Left click
-                ball_rect = pygame.Rect(self.golf_ball.x - self.golf_ball.radius, 
-                                        self.golf_ball.y - self.golf_ball.radius, 
-                                        self.golf_ball.radius * 2, 
-                                        self.golf_ball.radius * 2)
-                if ball_rect.collidepoint(event.pos):
-                    self.dragging_ball = True
-                    self.start_drag_pos = event.pos
-
-        elif event.type == pygame.MOUSEBUTTONUP:
-            if event.button == 1 and self.dragging_ball:
-                self.dragging_ball = False
-                end_drag_pos = event.pos
-                if self.start_drag_pos:
-                    # Calculate force/velocity based on drag distance and direction
-                    force_vector_x = (self.start_drag_pos[0] - end_drag_pos[0]) * 0.1
-                    force_vector_y = (self.start_drag_pos[1] - end_drag_pos[1]) * 0.1
-                    self.golf_ball.velocity_x = force_vector_x
-                    self.golf_ball.velocity_y = force_vector_y
-                self.start_drag_pos = None
-
-    def update(self, dt):
-        """Update game state."""
-        self.golf_ball.update(dt)
-        # Check if ball is in the hole
-        distance_to_hole = math.sqrt((self.golf_ball.x - self.golf_green.hole_pos[0])**2 + 
-                                     (self.golf_ball.y - self.golf_green.hole_pos[1])**2)
-        if distance_to_hole < self.golf_green.hole_radius - self.golf_ball.radius and \
-           math.sqrt(self.golf_ball.velocity_x**2 + self.golf_ball.velocity_y**2) < 2: # Ball must be slow enough to "fall in"
-            print("Ball in hole! You win!")
-            self.running = False # End simulation
-
-    def render(self):
-        """Render game elements to the screen."""
-        self.golf_green.draw(self.screen)
-        self.golf_ball.draw(self.screen)
-
-        # Optionally draw a line indicating drag direction/force
-        if self.dragging_ball and self.start_drag_pos:
-            current_mouse_pos = pygame.mouse.get_pos()
-            pygame.draw.line(self.screen, RED, self.start_drag_pos, current_mouse_pos, 2)
-
-        pygame.display.flip()
+    def _reset_ball(self):
+        """Resets the ball to its initial position and stops its velocity."""
+        self.ball = GolfBall(x=1.0, y=3.0) # Reset to initial position
+        self.game_over = False # Allow new strokes
 
     def run(self):
         """Main simulation loop."""
         self.running = True
         while self.running:
-            dt = self.clock.tick(FPS) / 1000.0 # Time since last frame in seconds
+            dt_ms = self.gui_manager.tick() # Get time since last frame in milliseconds
+            dt_s = dt_ms / 1000.0          # Convert to seconds for physics calculations
 
+            # --- Event Handling ---
             for event in pygame.event.get():
-                if event.type == pygame.QUIT:
+                actions = self.gui_manager.handle_input_event(event, self.ball)
+                
+                if 'quit' in actions:
                     self.running = False
-                self.handle_input(event)
+                
+                if 'set_ball_velocity' in actions and not self.game_over:
+                    self.ball.velocity = actions['set_ball_velocity']
+                
+                if 'reset_ball' in actions:
+                    self._reset_ball()
+                    self.green = self._initialize_green(self.current_elevation_func_idx) # Keep same green layout
 
-            self.update(dt)
-            self.render()
+                if 'new_layout' in actions:
+                    self._reset_ball()
+                    self.green = self._initialize_green(self.current_elevation_func_idx + 1) # Cycle to next layout
 
-        pygame.quit()
+            # --- Physics Update ---
+            # Only update physics if ball is moving
+            if np.linalg.norm(self.ball.velocity) > self.ball.stopped_threshold and not self.game_over:
+                calculate_physics(self.ball, self.green, dt_s)
+
+                # Check for ball in hole
+                if check_ball_in_hole(self.ball, self.green):
+                    print("Ball in hole! You win!")
+                    self.game_over = True
+            elif np.linalg.norm(self.ball.velocity) <= self.ball.stopped_threshold and not self.game_over:
+                # If ball has just stopped (and wasn't already game over)
+                # Set velocity to zero to ensure it's completely stopped for next stroke
+                self.ball.velocity = np.array([0.0, 0.0])
+
+            # --- Rendering ---
+            self.gui_manager.screen.fill((200, 255, 200)) # Clear screen with a light green background
+
+            self.gui_manager.draw_green(self.green)
+            self.gui_manager.draw_ball(self.ball)
+            self.gui_manager.draw_drag_indicator(self.ball) # Pass the ball object for its velocity property
+
+            # Display messages
+            self.gui_manager.display_message(f"Ball Pos: ({self.ball.position[0]:.2f}m, {self.ball.position[1]:.2f}m)", (10, 10))
+            self.gui_manager.display_message(f"Velocity: {np.linalg.norm(self.ball.velocity):.2f} m/s", (10, 40))
+            self.gui_manager.display_message(f"Layout: {self.current_elevation_func_idx + 1}/{len(self.elevation_functions)}", (10, 70))
+
+            if self.game_over:
+                self.gui_manager.display_message("GAME OVER - Ball in Hole! (Press 'R' to Reset)", (SCREEN_WIDTH // 2 - 200, SCREEN_HEIGHT // 2), (0,0,255))
+
+            self.gui_manager.update_display()
+
+        self.gui_manager.quit_pygame()
         sys.exit()
 
 
